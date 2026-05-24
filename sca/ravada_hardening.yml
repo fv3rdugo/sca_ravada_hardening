@@ -1,0 +1,193 @@
+# Policy for Ravada VDI, Libvirt, QEMU and Linux Host Security
+
+policy:
+  id: "ravada_hardening"
+  title: "Security Configuration Assessment for Ravada VDI and KVM/QEMU Host"
+  file: "ravada_hardening.yml"
+  name: "Ravada VDI hardening server"
+  description: "Critical security tweaks for Linux servers running Ravada VDI, libvirt environments, and QEMU hypervisors."
+  references:
+    - https://ravada.upc.edu
+    - https://ravada.readthedocs.io/en/latest/docs/spice_tls.html
+
+requirements:
+  title: "Check Ravada Server"
+  description: "Requirements for running the SCA scan against Ravada server"
+  condition: all
+  rules:
+    - 'f:/proc/sys/kernel/ostype -> Linux'
+    - 'f:/etc/ravada.conf'
+
+checks:
+  # ==========================================
+  # 1. RAVADA VDI & BACKEND DATABASE SECURITY
+  # ==========================================
+  - id: 200001
+    title: "Ensure secure permissions on configuration files"
+    description: "Ravada configuration files contain sensitive database credentials and API secrets. They must not be globally readable."
+    rationale: "Loose permissions on these files can expose the backend database credentials and service authentication tokens to unprivileged users."
+    remediation: "Run the following commands: chmod 400 /etc/rvd_front.conf /etc/ravada.conf"
+    condition: "all"
+    rules:
+      - "f:/etc/rvd_front.conf -> p:rw-------"
+      - "f:/etc/ravada.conf -> p:rw-------"
+
+  - id: 200002
+    title: "Verify secure cluster configuration (Required for v2.4+)"
+    description: "Verifies clustering security options for modern Ravada installations."
+    rationale: "Clustering mechanisms changed significantly after version 2.4."
+    remediation: "Review your cluster settings in /etc/ravada.conf."
+    condition: "all"
+    rules:
+      - "c:dpkg-query -W -f='${Version}' ravada -> v:>=2.4"
+      - "f:/etc/ravada.conf -> !r:^allow_unsecure_cluster"
+
+  - id: 20003
+    title: "Ensure Ravada package is installed"
+    description: "Ravada must be installed"
+    rationale: ""
+    remediation: "Download from UPC ETSETB repository and install Ravada: apt install ravada"
+    references:
+      - http://infoteleco.upc.edu/img/debian/
+    condition: any
+    rules:
+      - 'c:dpkg -s ravada -> r:Status: install ok'
+
+  - id: 200004
+    title: "Verify frontend daemon service is running"
+    description: "The Ravada VDI core daemon (rvd) must be active and managed properly by systemd."
+    rationale: "If the rvd_front service stops or crashes, the provisioning, scheduling, and management of virtual desktops will become completely unavailable."
+    remediation: "Run the following command: systemctl enable --now rvd_front"
+    condition: "all"
+    rules:
+      - "p:rvd_front"
+
+  - id: 200005
+    title: "Verify backend daemon service is running"
+    description: "The Ravada VDI core daemon (rvd) must be active and managed properly by systemd."
+    rationale: "If the rvd_back service stops or crashes, the provisioning, scheduling, and management of virtual desktops will become completely unavailable."
+    remediation: "Run the following command: systemctl enable --now rvd_back"
+    condition: "all"
+    rules:
+      - "p:rvd_back"
+
+  # ==========================================
+  # 2. LIBVIRT (VIRT-MANAGER) DAEMON SECURITY
+  # ==========================================
+  - id: 200010
+    title: "Libvirt: Ensure TLS/SSL is required for remote management"
+    description: "If libvirt is managed remotely over the network, it must enforce secure x509 connections."
+    rationale: "Unencrypted remote connections allow traffic interception, credential theft, and unauthorized control over the virtualization infrastructure."
+    remediation: "Edit /etc/libvirt/libvirtd.conf and set: listen_tls = 1 and tls_no_verify_certificate = 0."
+    condition: "all"
+    rules:
+      - "f:/etc/libvirt/libvirtd.conf -> r:^listen_tls\\s*=\\s*1"
+
+  - id: 200011
+    title: "Libvirt: Restrict access to libvirt UNIX socket to authorized groups"
+    description: "Only trusted administrators (e.g., libvirt or sudo group) should be allowed to interact with the control socket."
+    rationale: "Any user with read/write access to the libvirt socket can easily escalate privileges to root by creating a malicious VM that mounts the host's physical root drive."
+    remediation: "Edit /etc/libvirt/libvirtd.conf and configure: unix_sock_group = \"libvirt\" and unix_sock_rw_perms = \"0770\"."
+    condition: "all"
+    rules:
+      - "f:/etc/libvirt/libvirtd.conf -> r:^unix_sock_rw_perms\\s*=\\s*\"0770\""
+
+  # ==========================================
+  # 3. QEMU / KVM HYPERVISOR & VM SECURITY
+  # ==========================================
+  - id: 200020
+    title: "QEMU: Ensure QEMU processes run under an unprivileged user"
+    description: "Virtual machines (qemu-kvm processes) must not run as the host's root user."
+    rationale: "If an attacker achieves a 'VM-escape' vulnerability, running the QEMU process as root grants them immediate and absolute control over the physical host infrastructure."
+    remediation: "Edit /etc/libvirt/qemu.conf and uncomment or append: user = \"qemu\" and group = \"qemu\"."
+    condition: "all"
+    rules:
+      - "f:/etc/libvirt/qemu.conf -> r:^user\\s*=\\s*\"qemu\""
+      - "f:/etc/libvirt/qemu.conf -> r:^group\\s*=\\s*\"qemu\""
+
+  - id: 200021
+    title: "QEMU: Ensure KVM hardware acceleration modules are active"
+    description: "Verify that the KVM kernel modules (Intel or AMD) are loaded and active on the host."
+    rationale: "Without KVM, QEMU falls back to pure software emulation. This severely degrades VDI performance and can easily cause a Denial of Service (DoS) due to CPU exhaustion."
+    remediation: "Run: modprobe kvm_intel (for Intel CPUs) or modprobe kvm_amd (for AMD CPUs) and ensure virtualization is enabled in the BIOS."
+    condition: "any"
+    rules:
+      - "p:kvm_intel"
+      - "p:kvm_amd"
+
+  - id: 200022
+    title: "QEMU: Verify memory management safety features are configured"
+    description: "Check that the main QEMU configuration does not override safety verifications."
+    rationale: "Overriding memory validation or relaxing default limits could allow a single rogue virtual machine to overflow or crash the host's global RAM pool."
+    remediation: "Review global resource constraints within /etc/libvirt/qemu.conf."
+    condition: "all"
+    rules:      
+      - "f:/etc/libvirt/qemu.conf -> !r:^#\\s*relaxed_verify"
+
+  - id: 200023
+    title: "Hardening Spice security with TLS"
+    description: "Check that TLS support allows to encrypt all/some of the channels Spice uses for its communication. A separate port is used for the encrypted channels."
+    rationale: "Prevent eavesdropping and man-in-the-middle attacks."
+    remediation: "Review in /etc/libvirt/qemu.conf: spice_listen=”0.0.0.0”, spice_tls=1 and spice_tls_x509_cert_dir=”/etc/pki/libvirt-spice”."
+    condition: "all"
+    references:
+      - "https://ravada.readthedocs.io/en/latest/docs/spice_tls.html"
+    rules:
+      - "f:/etc/libvirt/qemu.conf r:^spice_listen\\s*=\\s*\"0.0.0.0\""
+      - "f:/etc/libvirt/qemu.conf r:^spice_tls\\s*=\\s*\"1\""
+      - "f:/etc/libvirt/qemu.conf r:^spice_tls_x509_cert_dir\\s*=\\s*\"/etc/pki/libvirt-spice\""
+ 
+  - id: 200024
+    title: "Apparmor"
+    description: "Check that TLS support allows to encrypt all/some of the channels Spice uses for its communication. A separate port is used for the encrypted channels."
+    rationale: "Prevent eavesdropping and man-in-the-middle attacks."
+    remediation: "Add /etc/pki/libvirt-spice/** r, in /etc/apparmor.d/abstractions/libvirt-qemu. Remmember restart the services: systemctl restart apparmor.service & systemctl restart libvirtd.service"
+    condition: "all"
+    references:
+      - "https://ravada.readthedocs.io/en/latest/docs/spice_tls.html"
+    rules:
+      - "f:/etc/apparmor.d/abstractions/libvirt-qemu -> r:^#\\s*/etc/pki/libvirt-spice/** r,"
+
+  # ==========================================
+  # 4. LINUX HOST NETWORK (VDI BRIDGING)
+  # ==========================================
+  - id: 200030
+    title: "Linux Host: Secure network IP forwarding behavior"
+    description: "Ravada relies on NAT/Routing bridges to connect virtual desktops. Network forwarding must be tightly guarded by a firewall."
+    rationale: "Enabling IP forwarding without strict iptables/nftables firewall rules can allow unauthorized cross-network pivoting between isolated VDI environments."
+    remediation: "Ensure that firewall services like ufw, firewalld, or nftables are running and managing libvirt virtual networks securely."
+    condition: "all"
+    rules:
+      - "f:/proc/sys/net/ipv4/ip_forward -> 1"
+
+  - id: 200031
+    title: "Ravada front"
+    description: "Ravada front "
+    rationale: "Frontend web"
+    remediation: "systemctl enable rvd_front; systemctl reload-services; systemctl start rvd_front"
+    condition: "all"
+    rules:
+      - "c:systemctl is-enabled rvd_front -> r:^enabled"
+
+  - id: 200032
+    title: "Ravada back"
+    description: "Ravada backend "
+    rationale: "Backend"
+    remediation: "systemctl enable rvd_back; systemctl reload-services; systemctl start rvd_back"
+    condition: "all"
+    rules:
+      - "c:systemctl is-enabled rvd_back -> r:^enabled"
+
+  
+  - id: 200033
+    title: "MySQL binlogs fill the disk"
+    description: "The binary log contains “events” that describe database changes such as table creation operations or changes to table data."
+    rationale: "It may create a lot of binlog files that in some cases may fill your disk drive. If you are not using replication it is safe to disable them if it is only used for Ravada."
+    remediation: "Review in /etc/mysql/mysql.conf.d/mysqld.cnf : skip-log-bin=true"
+    condition: "all"
+    references:
+      - "https://ravada.readthedocs.io/en/latest/docs/troubleshooting.html#mysql-binlogs-fill-the-disk"
+    rules:
+      - "f:/etc/mysql/mysql.conf.d/mysqld.cnf r:^skip-log-bin\\s*=\\s*\"true\""
+
+      
