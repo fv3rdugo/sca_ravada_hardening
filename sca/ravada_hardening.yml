@@ -2,7 +2,6 @@
 
 policy:
   id: "ravada_hardening"
-  title: "Security Configuration Assessment for Ravada VDI and KVM/QEMU Host"
   file: "ravada_hardening.yml"
   name: "Ravada VDI hardening server"
   description: "Critical security tweaks for Linux servers running Ravada VDI, libvirt environments, and QEMU hypervisors."
